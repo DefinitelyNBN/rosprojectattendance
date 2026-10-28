@@ -84,8 +84,8 @@ class TFTDisplay:
         self.font_badge    = _load_font(max(11, int(self.height * 0.052)), bold=True)
         self.font_tiny     = _load_font(max(9,  int(self.height * 0.045)), bold=False)
 
-        self._init_backend()
         self._init_arduino()
+        self._init_backend()
 
         # Initial screen
         self.show_idle()
@@ -95,6 +95,7 @@ class TFTDisplay:
     def _init_arduino(self):
         """Connect to Arduino Uno TFT Shield over USB serial if available."""
         if not getattr(config, "ARDUINO_TFT_ENABLED", True):
+            log.info("Arduino TFT Shield disabled in config.")
             return
 
         port = getattr(config, "ARDUINO_TFT_PORT", "auto")
@@ -106,38 +107,80 @@ class TFTDisplay:
         else:
             # Common Linux/Pi Arduino device paths
             import glob
-            candidates.extend(sorted(glob.glob("/dev/ttyACM*")))
             candidates.extend(sorted(glob.glob("/dev/ttyUSB*")))
+            candidates.extend(sorted(glob.glob("/dev/ttyACM*")))
             # macOS testing paths
             candidates.extend(sorted(glob.glob("/dev/cu.usbmodem*")))
             candidates.extend(sorted(glob.glob("/dev/cu.usbserial*")))
 
+        if not candidates:
+            log.warning("⚠️ Arduino TFT: No serial device candidates found (/dev/ttyUSB*, /dev/ttyACM*).")
+            return
+
         for p in candidates:
             try:
                 import serial
-                ser = serial.Serial(p, baud, timeout=1)
+                log.info("Attempting connection to Arduino TFT on %s @ %d baud...", p, baud)
+                ser = serial.Serial(p, baud, timeout=1.5)
                 ser.dtr = False
                 ser.rts = False
-                time.sleep(2.0) # Allow Arduino bootloader auto-reset to settle
+                time.sleep(2.5)  # Allow Arduino bootloader auto-reset & TFT setup() to settle
+
                 # Drain initial buffer
-                if ser.in_waiting:
-                    ser.read(ser.in_waiting)
+                startup_msgs = []
+                while ser.in_waiting:
+                    line = ser.readline().decode("utf-8", errors="ignore").strip()
+                    if line:
+                        startup_msgs.append(line)
+                if startup_msgs:
+                    log.info("Arduino startup banner: %s", " | ".join(startup_msgs))
+
+                # Handshake: Send PING and check for response
+                ser.write(b"PING\n")
+                ser.flush()
+                time.sleep(0.3)
+                pong_received = False
+                for _ in range(5):
+                    if ser.in_waiting:
+                        resp = ser.readline().decode("utf-8", errors="ignore").strip()
+                        if "PONG" in resp or "Ready" in resp or "ACK" in resp:
+                            pong_received = True
+                            break
+                    time.sleep(0.2)
+
                 self._arduino_ser = ser
-                log.info("TFT Display: Connected to Arduino Uno TFT Shield on %s @ %d baud", p, baud)
+                if pong_received:
+                    log.info("✅ TFT Display: Connected & Handshake OK with Arduino Uno TFT on %s", p)
+                else:
+                    log.info("TFT Display: Connected to %s (proceeding without handshake response)", p)
                 break
             except Exception as e:
-                log.debug("Could not connect to serial port %s: %s", p, e)
+                log.warning("Could not connect to Arduino serial port %s: %s", p, e)
 
     def _send_arduino(self, command: str):
-        """Send command string to Arduino Uno TFT Shield."""
-        if self._arduino_ser:
-            try:
-                line = (command.strip() + "\n").encode("utf-8")
-                self._arduino_ser.write(line)
-                self._arduino_ser.flush()
-                log.debug("Sent to Arduino: %s", command.strip())
-            except Exception as e:
-                log.warning("Error writing to Arduino TFT Serial: %s", e)
+        """Send command string to Arduino Uno TFT Shield and read ACK response."""
+        if not self._arduino_ser:
+            log.warning("⚠️ Cannot send '%s' to Arduino TFT: Serial port is not connected!", command.strip())
+            return
+
+        try:
+            cmd_clean = command.strip()
+            line = (cmd_clean + "\n").encode("utf-8")
+            self._arduino_ser.write(line)
+            self._arduino_ser.flush()
+            log.info("📡 Sent to Arduino TFT: %s", cmd_clean)
+
+            # Read back ACK if immediately available
+            time.sleep(0.05)
+            acks = []
+            while self._arduino_ser and self._arduino_ser.in_waiting:
+                resp = self._arduino_ser.readline().decode("utf-8", errors="ignore").strip()
+                if resp:
+                    acks.append(resp)
+            if acks:
+                log.info("📥 Arduino TFT ACK: %s", " | ".join(acks))
+        except Exception as e:
+            log.warning("⚠️ Error writing to Arduino TFT Serial: %s", e)
 
     def _init_backend(self):
         """Detect and initialize the display output target."""
@@ -151,10 +194,12 @@ class TFTDisplay:
         if self.backend == "auto":
             if os.path.exists(fb_path):
                 self._backend_type = "framebuffer"
-            elif has_display:
+            elif self._arduino_ser is not None:
+                # Arduino hardware shield is active
+                self._backend_type = "arduino"
+            elif has_display and not getattr(config, "ARDUINO_TFT_ENABLED", False):
                 self._backend_type = "window"
             else:
-                # Running headless (SSH / Robot without HDMI monitor)
                 self._backend_type = "headless"
         else:
             self._backend_type = self.backend
@@ -177,8 +222,8 @@ class TFTDisplay:
                 log.info("TFT Display: No graphical display detected. Running in headless mode.")
                 self._backend_type = "headless"
 
-        if self._backend_type == "headless":
-            log.info("TFT Display: Hardware headless mode active (Arduino / Serial visual feedback).")
+        if self._backend_type in ("headless", "arduino"):
+            log.info("TFT Display: Hardware backend active (Arduino / Serial visual feedback).")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -203,7 +248,9 @@ class TFTDisplay:
             t_str = time_str or datetime.now().strftime("%H:%M:%S")
             img = self._render_success(name, student_id, t_str)
             self._output(img)
-            self._send_arduino(f"OK:{name}:{student_id}")
+            clean_name = str(name).strip().replace(" ", "_")
+            clean_sid = str(student_id).strip()
+            self._send_arduino(f"OK:{clean_name}:{clean_sid}")
             log.info("TFT: Displaying [GREEN CHECKMARK] for %s (%s)", name, student_id)
             self._schedule_revert()
 

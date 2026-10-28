@@ -71,6 +71,11 @@ void setup() {
   Serial.begin(115200);
   while (!Serial) { ; } // wait for serial port to connect
 
+  // Clear any noise/junk from UART RX buffer upon reset
+  while (Serial.available() > 0) {
+    Serial.read();
+  }
+
   uint16_t ID = tft.readID();
   // Register dump showed reg(0x00D3) = 00 00 91 41 -> ILI9341 with bit 9 low
   if (ID == 0x9141 || ID == 0xD3D3 || ID == 0xD3 || ID == 0x0 || ID == 0xFFFF) {
@@ -82,8 +87,14 @@ void setup() {
   tft.setRotation(1);
   tft.fillScreen(BG_DARK);
 
-  Serial.println(F("[ARDUINO_TFT] Ready. Waiting for commands..."));
   showIdleScreen(0);
+
+  // Clear serial again after screen draw in case host sent bytes during begin/fillScreen
+  while (Serial.available() > 0) {
+    Serial.read();
+  }
+
+  Serial.println(F("[ARDUINO_TFT] Ready. Waiting for commands..."));
 }
 
 void loop() {
@@ -97,6 +108,10 @@ void loop() {
       }
     } else {
       inputBuffer += c;
+      // Prevent memory fragmentation/exhaustion on ATmega328P
+      if (inputBuffer.length() > 100) {
+        inputBuffer = "";
+      }
     }
   }
 
@@ -111,20 +126,31 @@ void handleSerialCommand(String cmd) {
   cmd.trim();
   if (cmd.length() == 0) return;
 
-  if (cmd.startsWith("OK:")) {
+  // Tolerant search: locate command token anywhere in buffer to ignore any leading noise/garbage
+  int okIdx   = cmd.indexOf("OK:");
+  int unkIdx  = cmd.indexOf("UNKNOWN");
+  int idleIdx = cmd.indexOf("IDLE");
+  int pingIdx = cmd.indexOf("PING");
+
+  if (okIdx != -1) {
     // Format: OK:FirstName_LastName:ID
-    int firstColon = cmd.indexOf(':');
-    int secondColon = cmd.indexOf(':', firstColon + 1);
+    String sub = cmd.substring(okIdx);
+    int firstColon = sub.indexOf(':');
+    int secondColon = sub.indexOf(':', firstColon + 1);
 
     String personName = "Student";
     String studentId = "";
 
     if (secondColon != -1) {
-      personName = cmd.substring(firstColon + 1, secondColon);
-      studentId  = cmd.substring(secondColon + 1);
+      personName = sub.substring(firstColon + 1, secondColon);
+      studentId  = sub.substring(secondColon + 1);
     } else {
-      personName = cmd.substring(firstColon + 1);
+      personName = sub.substring(firstColon + 1);
     }
+
+    // Clean up whitespace & newlines
+    personName.trim();
+    studentId.trim();
 
     // Replace underscores with spaces for clean UI
     personName.replace("_", " ");
@@ -135,23 +161,28 @@ void handleSerialCommand(String cmd) {
     showSuccessCheckmark(personName, studentId);
     Serial.println(F("ACK:SUCCESS_DISPLAYED"));
 
-  } else if (cmd == "UNKNOWN" || cmd.startsWith("UNKNOWN:")) {
+  } else if (unkIdx != -1) {
     currentState = STATE_CROSS;
     stateTimestamp = millis();
     showUnknownCross();
     Serial.println(F("ACK:UNKNOWN_DISPLAYED"));
 
-  } else if (cmd.startsWith("IDLE")) {
-    int colon = cmd.indexOf(':');
+  } else if (idleIdx != -1) {
+    String sub = cmd.substring(idleIdx);
+    int colon = sub.indexOf(':');
     if (colon != -1) {
-      attendanceCount = cmd.substring(colon + 1).toInt();
+      attendanceCount = sub.substring(colon + 1).toInt();
     }
     currentState = STATE_IDLE;
     showIdleScreen(attendanceCount);
     Serial.println(F("ACK:IDLE_DISPLAYED"));
 
-  } else if (cmd == "PING") {
+  } else if (pingIdx != -1) {
     Serial.println(F("PONG"));
+
+  } else {
+    Serial.print(F("ERR:UNKNOWN_CMD:"));
+    Serial.println(cmd);
   }
 }
 

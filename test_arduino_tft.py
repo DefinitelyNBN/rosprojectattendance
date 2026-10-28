@@ -31,13 +31,21 @@ try:
     ser.dtr = False
     ser.rts = False
     
-    print("[*] Waiting 2 seconds for Arduino initialization...")
-    time.sleep(2)
+    print("[*] Waiting 2.5 seconds for Arduino initialization...")
+    time.sleep(2.5)
     
     # Read any startup banners from Arduino
     while ser.in_waiting:
         line = ser.readline().decode('utf-8', errors='ignore').strip()
         print(f"    [Arduino Startup]: {line}")
+
+    # Test 0: Handshake PING
+    print("\n[0/3] Sending Handshake PING...")
+    ser.write(b"PING\n")
+    ser.flush()
+    time.sleep(0.5)
+    while ser.in_waiting:
+        print(f"    [Arduino Response]: {ser.readline().decode('utf-8', errors='ignore').strip()}")
 
     # Test 1: Idle Screen
     print("\n[1/3] Sending IDLE:0...")
