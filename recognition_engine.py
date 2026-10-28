@@ -125,60 +125,111 @@ class RecognitionEngine:
 
     # ── Camera Initialization (V4L2 + MJPG for Pi) ───────────────────────────
 
-    def _init_camera(self):
+    def _open_device(self, idx: int):
         is_linux = platform.system() == "Linux"
         cap = None
 
-        # On Linux/Raspberry Pi, V4L2 is the lowest-latency capture backend
         if is_linux:
             try:
-                cap = cv2.VideoCapture(config.CAMERA_INDEX, cv2.CAP_V4L2)
-                log.info("Attempted cv2.CAP_V4L2 backend")
-            except Exception as e:
-                log.warning("CAP_V4L2 failed, trying default: %s", e)
+                cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            except Exception:
+                pass
 
         if cap is None or not cap.isOpened():
-            cap = cv2.VideoCapture(config.CAMERA_INDEX)
+            try:
+                cap = cv2.VideoCapture(idx)
+            except Exception:
+                pass
 
-        if not cap.isOpened():
+        if cap is None or not cap.isOpened():
             return None
 
         # Raspberry Pi optimization: Enable hardware MJPG compression
-        # This prevents USB bus saturation when using external USB webcams on Pi 4B
         if config.USE_MJPG:
             try:
                 fourcc = cv2.VideoWriter_fourcc(*'MJPG')
                 cap.set(cv2.CAP_PROP_FOURCC, fourcc)
-            except Exception as e:
-                log.debug("Could not set MJPG fourcc: %s", e)
+            except Exception:
+                pass
 
         # Set resolution & FPS
         cap.set(cv2.CAP_PROP_FRAME_WIDTH,  config.FRAME_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, config.FRAME_HEIGHT)
         cap.set(cv2.CAP_PROP_FPS,          config.FPS_TARGET)
 
-        # Minimize driver buffer to 1 to guarantee 0-frame latency on robot
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
 
-        return cap
+        # Verify device is an actual video capture device (not a codec or metadata node)
+        try:
+            ret, frame = cap.read()
+            if ret and frame is not None and frame.size > 0:
+                return cap
+        except Exception:
+            pass
+
+        try:
+            cap.release()
+        except Exception:
+            pass
+        return None
+
+    def _init_camera(self):
+        # Build candidate device list
+        candidates = [config.CAMERA_INDEX]
+
+        # On Linux/Pi, automatically detect all /dev/video* devices
+        if platform.system() == "Linux":
+            import glob
+            for dev_path in sorted(glob.glob("/dev/video*")):
+                try:
+                    num = int(dev_path.replace("/dev/video", ""))
+                    if num not in candidates:
+                        candidates.append(num)
+                except ValueError:
+                    pass
+
+        for fallback_idx in [0, 1, 2, 3, 4]:
+            if fallback_idx not in candidates:
+                candidates.append(fallback_idx)
+
+        log.info("Probing video capture devices (candidates: %s)...", candidates)
+        for idx in candidates:
+            cap = self._open_device(idx)
+            if cap:
+                config.CAMERA_INDEX = idx
+                log.info("✅ Successfully initialized camera at index %d (%dx%d)",
+                         idx, config.FRAME_WIDTH, config.FRAME_HEIGHT)
+                return cap
+
+        log.error("❌ No accessible video capture camera found across candidates: %s", candidates)
+        return None
 
     # ── Thread 1: Camera Grabber (Always Fresh Frames) ────────────────────────
 
     def _capture_loop(self):
         """Continuously reads frames to drain hardware buffers and store the latest."""
+        consecutive_fails = 0
         while self._running:
             if self._paused:
                 time.sleep(0.05)
                 continue
 
+            if self._cap is None:
+                time.sleep(0.1)
+                continue
+
             ret, frame = self._cap.read()
             if not ret or frame is None:
+                consecutive_fails += 1
+                if consecutive_fails % 150 == 0:
+                    log.warning("Camera read failed repeatedly on index %d", config.CAMERA_INDEX)
                 time.sleep(0.02)
                 continue
 
+            consecutive_fails = 0
             with self._frame_lock:
                 self._latest_raw = frame
             self._new_frame_event.set()
