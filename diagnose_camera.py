@@ -95,6 +95,8 @@ working_indices = []
 for node in nodes:
     try:
         idx = int(node.replace("/dev/video", ""))
+        if idx > 5:
+            continue
         cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
         if not cap.isOpened():
             cap = cv2.VideoCapture(idx)

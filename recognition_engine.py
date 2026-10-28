@@ -239,24 +239,18 @@ class Picam2Adapter:
         return None
 
     def _init_camera(self):
-        # 1. Probe standard V4L2 USB capture devices
-        candidates = [config.CAMERA_INDEX]
+        # 1. Probe standard V4L2 USB capture devices (indices 0..5 only)
+        # Note: On Raspberry Pi, /dev/video10 through /dev/video31 are Broadcom ISP/codec nodes.
+        # Probing them causes 10-second select() timeouts and OpenCV FFMPEG exceptions.
+        candidates = []
+        if 0 <= config.CAMERA_INDEX <= 5:
+            candidates.append(config.CAMERA_INDEX)
 
-        if platform.system() == "Linux":
-            import glob
-            for dev_path in sorted(glob.glob("/dev/video*")):
-                try:
-                    num = int(dev_path.replace("/dev/video", ""))
-                    if num not in candidates:
-                        candidates.append(num)
-                except ValueError:
-                    pass
+        for idx in [0, 1, 2, 3, 4, 5]:
+            if idx not in candidates:
+                candidates.append(idx)
 
-        for fallback_idx in [0, 1, 2, 3, 4]:
-            if fallback_idx not in candidates:
-                candidates.append(fallback_idx)
-
-        log.info("Probing USB/V4L2 video capture devices (candidates: %s)...", candidates)
+        log.info("Probing video capture devices (indices: %s)...", candidates)
         for idx in candidates:
             cap = self._open_device(idx)
             if cap:
