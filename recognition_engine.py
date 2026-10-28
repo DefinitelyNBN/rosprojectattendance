@@ -123,7 +123,35 @@ class RecognitionEngine:
             except Exception:
                 pass
 
-    # ── Camera Initialization (V4L2 + MJPG for Pi) ───────────────────────────
+class Picam2Adapter:
+    """Adapter to expose native Raspberry Pi Picamera2 with standard OpenCV VideoCapture interface."""
+    def __init__(self, width: int = 640, height: int = 480):
+        from picamera2 import Picamera2
+        self._picam2 = Picamera2()
+        cam_config = self._picam2.create_video_configuration(main={"size": (width, height), "format": "RGB888"})
+        self._picam2.configure(cam_config)
+        self._picam2.start()
+
+    def read(self):
+        try:
+            rgb = self._picam2.capture_array()
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+            return True, bgr
+        except Exception:
+            return False, None
+
+    def release(self):
+        try:
+            self._picam2.stop()
+            self._picam2.close()
+        except Exception:
+            pass
+
+    def isOpened(self):
+        return True
+
+
+    # ── Camera Initialization (V4L2 + Picamera2 + MJPG for Pi) ───────────────
 
     def _open_device(self, idx: int):
         is_linux = platform.system() == "Linux"
@@ -176,11 +204,44 @@ class RecognitionEngine:
             pass
         return None
 
+    def _try_picamera2(self):
+        """Attempts to initialize Raspberry Pi Camera Module using native Picamera2."""
+        try:
+            log.info("Probing native Raspberry Pi Camera Module via Picamera2...")
+            adapter = Picam2Adapter(config.FRAME_WIDTH, config.FRAME_HEIGHT)
+            ret, frame = adapter.read()
+            if ret and frame is not None and frame.size > 0:
+                log.info("✅ Successfully initialized Raspberry Pi CSI Camera via Picamera2 (%dx%d)",
+                         config.FRAME_WIDTH, config.FRAME_HEIGHT)
+                return adapter
+            adapter.release()
+        except Exception as e:
+            log.debug("Picamera2 not available or no CSI camera: %s", e)
+        return None
+
+    def _try_gstreamer_libcamera(self):
+        """Attempts to open CSI camera via GStreamer libcamerasrc."""
+        try:
+            gst = (
+                f"libcamerasrc ! "
+                f"video/x-raw, width={config.FRAME_WIDTH}, height={config.FRAME_HEIGHT}, framerate={config.FPS_TARGET}/1 ! "
+                f"videoconvert ! video/x-raw, format=BGR ! appsink drop=true"
+            )
+            cap = cv2.VideoCapture(gst, cv2.CAP_GSTREAMER)
+            if cap and cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None and frame.size > 0:
+                    log.info("✅ Successfully initialized Raspberry Pi Camera via GStreamer libcamerasrc")
+                    return cap
+                cap.release()
+        except Exception:
+            pass
+        return None
+
     def _init_camera(self):
-        # Build candidate device list
+        # 1. Probe standard V4L2 USB capture devices
         candidates = [config.CAMERA_INDEX]
 
-        # On Linux/Pi, automatically detect all /dev/video* devices
         if platform.system() == "Linux":
             import glob
             for dev_path in sorted(glob.glob("/dev/video*")):
@@ -195,7 +256,7 @@ class RecognitionEngine:
             if fallback_idx not in candidates:
                 candidates.append(fallback_idx)
 
-        log.info("Probing video capture devices (candidates: %s)...", candidates)
+        log.info("Probing USB/V4L2 video capture devices (candidates: %s)...", candidates)
         for idx in candidates:
             cap = self._open_device(idx)
             if cap:
@@ -204,7 +265,20 @@ class RecognitionEngine:
                          idx, config.FRAME_WIDTH, config.FRAME_HEIGHT)
                 return cap
 
-        log.error("❌ No accessible video capture camera found across candidates: %s", candidates)
+        # 2. Attempt Raspberry Pi CSI Camera via Picamera2
+        if platform.system() == "Linux":
+            cap = self._try_picamera2()
+            if cap:
+                return cap
+
+            # 3. Attempt GStreamer libcamerasrc
+            cap = self._try_gstreamer_libcamera()
+            if cap:
+                return cap
+
+        log.error("❌ No accessible camera found (USB webcam or Pi CSI Camera).")
+        log.error("👉 Tip: If using Raspberry Pi CSI ribbon camera, run: libcamerify python3 headless.py")
+        log.error("👉 Tip: If using USB webcam, re-check USB cable or run: python3 diagnose_camera.py")
         return None
 
     # ── Thread 1: Camera Grabber (Always Fresh Frames) ────────────────────────
