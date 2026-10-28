@@ -51,7 +51,7 @@ Open the **Arduino IDE** on your computer and install the following libraries vi
    - **Port**: Select the active COM / `/dev/cu.usbmodem` port.
 4. Click **Upload** (Ctrl + U or ⌘ + U).
 5. Once uploaded, the screen will initialize in landscape mode (320x240) showing:
-   - Top Header: `AUTONOMOUS ATTENDANCE`
+   - Top Header: `SMILE PLEASE :)`
    - Center: Animated cyan radar reticle
    - Bottom: `ATTENDED: 0`
 

@@ -165,8 +165,8 @@ void showIdleScreen(int count) {
   tft.fillRect(0, 0, 320, 35, DARKGREY);
   tft.setTextColor(WHITE);
   tft.setTextSize(2);
-  tft.setCursor(20, 10);
-  tft.print(F("AUTONOMOUS ATTENDANCE"));
+  tft.setCursor(32, 10);
+  tft.print(F("SMILE PLEASE :)"));
 
   // Center Radar Reticle Icon
   int cx = 160;
